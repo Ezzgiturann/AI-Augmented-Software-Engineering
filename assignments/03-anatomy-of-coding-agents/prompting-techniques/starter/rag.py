@@ -7,6 +7,7 @@ Fill in YOUR_SYSTEM_PROMPT and YOUR_RETRIEVER.
 Run:  python rag.py
 """
 import os
+import re
 
 from ollama import chat
 
@@ -21,12 +22,48 @@ def load_chunks() -> list[str]:
 
 
 # TODO: return the subset of chunks relevant to `question` (simple keyword overlap is fine).
+STOP = {
+    "do", "you", "to", "the", "a", "an", "is", "are",
+    "i", "my", "me", "we", "our", "and", "or", "of",
+    "in", "on", "for", "it", "this", "that", "what",
+    "how", "can", "could", "please", "with", "be",
+    "have", "has", "does", "your", "about", "where"
+}
+
+
 def YOUR_RETRIEVER(question: str, chunks: list[str]) -> list[str]:
-    return []
+    question_words = set(re.findall(r"[a-z]+", question.lower()))
+    question_words -= STOP
+    question_words = {w for w in question_words if len(w) >= 3}
+
+    relevant_chunks = []
+
+    for chunk in chunks:
+        chunk_words = set(re.findall(r"[a-z]+", chunk.lower()))
+        chunk_words -= STOP
+
+        matched = any(
+            a.startswith(b) or b.startswith(a)
+            for a in question_words
+            for b in chunk_words
+        )
+
+        if matched:
+            relevant_chunks.append(chunk)
+
+    return relevant_chunks
 
 
 # TODO: Fill this in! Force the model to answer only from the provided context.
-YOUR_SYSTEM_PROMPT = ""
+YOUR_SYSTEM_PROMPT = """You are a helpful customer support assistant.
+
+Answer the user's question using only the information provided in the Context.
+
+Do not use outside knowledge or make up information that is not present in the Context.
+
+If the Context does not contain enough information to answer the question, say "I don't know."
+
+Keep your answer clear, concise, and relevant to the question."""
 
 CASES = [
     ("How long do I have to return an item?", ["30 days"]),

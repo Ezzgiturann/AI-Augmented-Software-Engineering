@@ -18,7 +18,22 @@ POLICY = """Refund policy:
 """
 
 # TODO: Fill this in! Encourage step-by-step reasoning, ending with DECISION: YES/NO.
-YOUR_SYSTEM_PROMPT = ""
+YOUR_SYSTEM_PROMPT = """You are a refund eligibility checker for an online store.
+
+Think step by step. For each rule in the policy below:
+1. Check whether the purchase was made within the last 30 days.
+2. Check whether the product is unused.
+3. Check whether the product is marked as final-sale.
+
+Then approve the refund only if all three rules are satisfied. If even one rule is violated, reject the refund. If information is missing, do not assume that the rule is satisfied. If any rule is violated, the decision must be NO, even if other information is missing.
+
+Explain your reasoning briefly by checking each rule individually.
+
+The LAST line of your answer must be exactly:
+DECISION: YES
+or
+DECISION: NO
+"""
 
 CASES = [
     ("Bought 10 days ago, unused, not final sale.", "YES"),
