@@ -363,14 +363,103 @@ Efficiency" section (L16) says that "the larger context is early in the session,
 expensive each subsequent turn is." [INFERRED]
 
 ### 3. Planning
-TODO
+**How it planned:** with the `update_topic` tool, not plain text, not `write_todos`
+(which wasn't even offered), and not plan mode. [OBSERVED] It called `update_topic` 12
+times, with titles such as "Codebase Inspection", "Updating Pricing Rules and Shipping",
+"Updating Test Suite with Shipping Rules", "Validating Test Suite", "Checking Git Status
+and Diff", and "Task Completed". This is exactly what the system prompt's "Topic Updates"
+section asks for: "Always call update_topic in your first turn" (L56) and "Each corresponds
+to a distinct phase of the task" (L60). The Development Lifecycle section also says *not*
+to use plan mode "for straightforward bug fixes" (L137). [OBSERVED in `system.md`]
+
+**Did the plan match what it did?** Yes, phase by phase: inspect → fix pricing/shipping →
+update tests → validate → check diff → done, in that order (calls #3 → #15). [OBSERVED]
+
+**Where it departed:** from *my* instruction, not from its own topics. My prompt said
+"First write out your plan", but call #1 produced only 59 output tokens and went straight to
+`update_topic` + `read_file(TASK.md)`; no up-front plan for the whole task was ever written.
+[OBSERVED] Topics only describe the *next* phase, so the plan appeared step by step rather
+than all at once.
+
+**My view:** the agent did plan, but it showed the plan through tool calls instead of
+writing it out. That works technically, but it doesn't explain the overall process to the
+user up front, so it is less clear than a written plan would have been.
 
 ### 4. Error recovery
-> quoted failure
-TODO — what happened next and whether it was good.
+**First failure:** the agent's first pytest run (call #2's tool result). [OBSERVED]
+> ```
+> FAILED tests/test_cart.py::test_add_same_item_twice_increments_quantity - AssertionError: assert {'MUG': 2} == {'MUG': 3}
+> FAILED tests/test_cart.py::test_fixed_discount_applied_before_tax - assert 1160 == 3240
+> 2 failed, 12 passed in 0.05s
+> ```
+
+**What it did next:** it did not patch immediately. It read all five source and test files
+(#3–#7), ran `grep_search` for `.total(` callers, and spent its longest thinking turn of the
+session at #8 (4,641 thinking tokens). [OBSERVED] It then fixed **two separate bugs** behind
+the failures: `add_item` overwrote the quantity instead of adding to it (`cart.py`), and
+`final_total` applied the discount *after* tax instead of before (`pricing.py`). [OBSERVED
+in the session diff] The `1160` comes from both bugs together: two `TEE` adds left quantity
+1 (2000), tax made it 2160, and then the 1000 discount gave 1160. [INFERRED from the diff
+and catalog prices] The next pytest run (#13) passed: `18 passed`. [OBSERVED]
+
+The four `503 high demand` errors were never seen by the model: the CLI retried each one
+after 4–8 seconds and the next `RESPONSE` continued normally. [OBSERVED in the timeline]
+
+**Was it good?** Yes. It found and fixed both bugs behind the first test failure instead of
+patching only the symptom, and because the CLI handled the 503 errors automatically, the
+agent could stay focused on the actual task.
 
 ### 5. The tests
-TODO — any edits to existing tests, quoted diff, allowed by TASK.md?
+**Yes, it edited existing tests:** three expected values in `tests/test_cart.py`. [OBSERVED in `c01f037`]
+```diff
+-    assert cart.total() == 2160  # 2000 + 8% tax
++    assert cart.total() == 2759  # 2000 + 8% tax + $5.99 shipping
+...
+-    assert cart.total() == 2333  # (2400 - 10%) + 8% tax
++    assert cart.total() == 2932  # (2400 - 10%) + 8% tax + $5.99 shipping
+...
+-    assert cart.total() == 3240  # (4000 - 1000) + 8% tax
++    assert cart.total() == 3839  # (4000 - 1000) + 8% tax + $5.99 shipping
+```
+It also added four new tests (empty cart, two free-shipping cases, one charged case).
+
+**Allowed by `TASK.md`?** Mostly. Step 2 says: "You may update those expected values — and
+only those — and note why in a comment." All three are `Cart.total()` values from before
+shipping existed, and each new value is exactly old + 599, so they are the permitted kind.
+[OBSERVED] `test_fixed_discount_applied_before_tax` was also one of the two failing tests
+that step 1 says not to edit, but by the time the agent edited it the code fix already
+made 3240 correct; the change only adds shipping. [INFERRED from call order: `pricing.py`
+fixed at #10, test edited at #12]
+
+**Weaknesses:**
+- The comments only say "+ $5.99 shipping"; they don't say *why* the expected value
+  changed (the new shipping rule), which `TASK.md` asks for.
+- The boundary is not actually tested. `test_shipping_free_at_threshold` uses 6000 cents,
+  not 5000, and no test uses 4999. A bug like `> 5000` instead of `>= 5000` would still
+  pass every test. [OBSERVED in the diff]
 
 ### 6. Models
-TODO
+**Confirmed:** every `RESPONSE` line shows `model=gemini-3.5-flash-lite`, and the timeline
+Summary reports `models: gemini-3.5-flash-lite x16`. [OBSERVED]
+
+**Where it thought the most** (`thoughts_token_count`) [OBSERVED]:
+- **#8 (4,641):** after reading every file and right before the first edit. It was deciding
+  the root causes and the fix strategy for both bugs plus the shipping design.
+- **#6 (1,321):** right after reading `tests/test_cart.py`. It was working out what the
+  tests expect (the intended discount/tax order).
+- **#9 (800):** writing the first `replace` (the `add_item` fix) and planning the next edit.
+
+Routine steps (reading the next file, running pytest, `git status`) used under 100 thinking
+tokens. [OBSERVED] Thinking is spent on decisions, not on actions.
+
+**Why split the job across two models:** the CLI uses the small, cheap model for simple
+routing work and the larger model for the harder work, which keeps cost down. Routing is
+a quick classification that a small model does well and fast, so the big model's price is
+only paid where its reasoning matters. [INFERRED]
+
+**If the whole session ran on a bigger model:** quality would probably go up (for example,
+a better chance of testing the exact 5000 boundary), but cost would rise and each call would
+be slower, which adds up over 16+ calls whose input grows every turn. Running everything on
+the small model, as I did, is cheaper and faster but carries a higher risk of mistakes,
+such as the missed boundary test and ignoring the "write out your plan" instruction.
+[INFERRED]
