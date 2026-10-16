@@ -227,10 +227,43 @@ Total: 26 tool calls, 0 failed. Not offered in this session: `write_todos`,
   `decision=accept`). [OBSERVED]
 
 ### Why old/new string edits?
-TODO — two reasons plus a trace moment.
+1. **Line numbers drift.** After one edit adds or removes lines, every line number the
+   model read earlier is wrong. An `old_string` anchors the edit to the *text* itself, so it
+   still finds the right place no matter what changed above it, and if the text is gone the
+   edit fails instead of hitting the wrong line.
+2. **Tokens and safety.** Rewriting the whole file means re-generating every unchanged line:
+   it costs far more output tokens, and any line the model mis-copies or abbreviates
+   (`...`) is silently lost. Sending only the changed snippet is cheaper and leaves the rest
+   of the file untouched; it also produces a small diff the user can review in the approval
+   dialog.
+
+**Trace moment:** the agent read `test_cart.py` at call #5, then **re-read it at call #11**
+right before editing it at #12, after it had already edited `cart.py` and `pricing.py`.
+[OBSERVED] It refreshed the exact text it needed for `old_string` instead of relying on
+an older view. [INFERRED] All three `replace` calls succeeded on the first try (0 failed
+tool calls), so the failure path never came up. [OBSERVED]
 
 ### Per-model tool descriptions
-TODO — tool compared, what differs between model families, why.
+**Tool compared:** `replace`, in
+[`gemini-3.ts` L356](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/model-family-sets/gemini-3.ts#L356)
+(what my session saw, confirmed in the trace's `functionDeclarations`) vs
+[`default-legacy.ts` L349](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/model-family-sets/default-legacy.ts#L349).
+
+| | `gemini-3.ts` | `default-legacy.ts` |
+|---|---|---|
+| Length | ~4 sentences | ~20 lines with a numbered rule list |
+| "Always use `read_file` … before attempting a text replacement" | absent | present |
+| "Include at least 3 lines of context BEFORE and AFTER" | absent | present, marked **CRITICAL** |
+| `instruction` guidance | one sentence | WHY/WHERE/WHAT checklist + GOOD/BAD examples |
+| Why prefer this tool | "minimizes token usage, simplifies code reviews, and avoids accidental deletions" | absent |
+
+**Why:** older models need detailed rules and examples to make up for weaker understanding
+and reduce errors: the legacy description is effectively a few-shot prompt, the same
+technique that made my k-shot classifier work. Newer models follow instructions well enough
+to get the same result from a short description. A shorter description also saves tokens on
+every turn: the full tool list is re-sent with **each** request (20 times in my session,
+identical every time [OBSERVED]), so extra words in a description are paid for over and
+over.
 
 ---
 
