@@ -142,33 +142,89 @@ reused across projects. [INFERRED from the identical `session_system.md` variant
 ## Part III — Tool design
 
 ### Inventory
+Source: the `functionDeclarations` array sent with every request in the trace (16 tools,
+identical across all 20 requests). [OBSERVED] Counts from `session_timeline.txt` Summary.
+
 | Category | Tools | Used in session (count) |
 |---|---|---|
-| File | TODO | TODO |
-| Search | TODO | TODO |
-| Shell | TODO | TODO |
-| Web | TODO | TODO |
-| Memory / other | TODO | TODO |
+| File | `read_file`, `write_file`, `replace`, `list_directory` | `read_file` ×7, `replace` ×3 |
+| Search | `grep_search`, `glob` | `grep_search` ×1 |
+| Shell | `run_shell_command`, `list_background_processes`, `read_background_output` | `run_shell_command` ×3 |
+| Web | `web_fetch`, `google_web_search` | — |
+| Planning and narration | `update_topic`, `enter_plan_mode` | `update_topic` ×12 |
+| Delegation | `invoke_agent` (sub-agents), `activate_skill` | — |
+| Other | `ask_user` | — |
 
-### Tool A: TODO
-- **Source file:** TODO
+Total: 26 tool calls, 0 failed. Not offered in this session: `write_todos`,
+`read_many_files`, `get_internal_docs`, `exit_plan_mode` (declared in
+`base-declarations.ts` but absent from the request). [OBSERVED]
+
+### Tool A: `replace` (file edit)
+- **Source file:** name and params in
+  [`base-declarations.ts` L64–69](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/base-declarations.ts#L64-L69);
+  description/schema the model saw in
+  [`model-family-sets/gemini-3.ts` L356](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/model-family-sets/gemini-3.ts#L356);
+  runtime in [`edit.ts`](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/edit.ts).
 - **Schema:**
   ```
-  TODO
+  replace(
+    file_path:      string   (required)
+    instruction:    string   (required)
+    old_string:     string   (required)
+    new_string:     string   (required)
+    allow_multiple: boolean  (optional, default false)
+  )
   ```
-- **Why each parameter:** TODO
-- **Description line that corrects a model mistake:** > TODO. **Mistake:** TODO
-- **Deliberately does not:** TODO
+- **Why each parameter:**
+  - `file_path`: which file to edit; validated and resolved inside the workspace (`validateToolParamValues`, edit.ts L1176).
+  - `instruction`: a self-contained statement of intent ("Increment item quantity instead of overwriting…" in my trace). If the literal match fails, edit.ts passes it to a second LLM call, `FixLLMEditWithInstruction` (L588), which uses the intent plus the current file content to repair `old_string`/`new_string`. Without it, a failed match could only be retried blindly.
+  - `old_string`: the exact text to find; anchors the edit to content instead of positions.
+  - `new_string`: the exact replacement text.
+  - `allow_multiple`: an explicit opt-in for replacing every match, so a non-unique `old_string` is an error by default rather than a silent multi-edit.
+- **Description line that corrects a model mistake:**
+  > Do not use omission placeholders like '(rest of methods ...)', '...', or 'unchanged code'; provide exact literal code. (`new_string` description)
 
-### Tool B: TODO
-- **Source file:** TODO
+  **Mistake:** LLMs like to abbreviate unchanged code with `...`; written literally into the file, that silently deletes real code.
+- **Deliberately does not:** pick one match when `old_string` is ambiguous. If it occurs more
+  than once without `allow_multiple`, the edit fails with "Expected 1 occurrence but found N
+  … If you intended to replace multiple occurrences, set 'allow_multiple' to true"
+  (edit.ts L372–375). Editing the wrong one of two identical blocks would be a silent bug;
+  failing forces the model to add more surrounding context. (A *missing* match is handled
+  differently: the tool first tries the LLM fixer above, and only then fails with "Could not
+  find an exact match … please use ReadFile to inspect the target lines", L366–369.)
+
+### Tool B: `run_shell_command`
+- **Source file:** name and params in
+  [`base-declarations.ts` L56–58](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/base-declarations.ts#L56-L58);
+  description/schema built by `getShellToolDescription` (L36) and `getShellDeclaration` (L85) in
+  [`dynamic-declaration-helpers.ts`](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/definitions/dynamic-declaration-helpers.ts);
+  runtime in [`shell.ts`](https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/tools/shell.ts).
 - **Schema:**
   ```
-  TODO
+  run_shell_command(
+    command:       string   (required)
+    description:   string   (optional)
+    dir_path:      string   (optional)
+    is_background: boolean  (optional)
+    delay_ms:      integer  (optional)
+    [additional_permissions: object]  (only when tool sandboxing is enabled; not in my session)
+  )
   ```
-- **Why each parameter:** TODO
-- **Description line that corrects a model mistake:** > TODO. **Mistake:** TODO
-- **Deliberately does not:** TODO
+- **Why each parameter:**
+  - `command`: the exact command, run as `bash -c <command>` on macOS/Linux or `powershell.exe -NoProfile -Command` on Windows.
+  - `description`: a one-sentence explanation shown in the approval dialog; implements the system prompt's "Explain Critical Commands" rule (L182). In my trace: "Run pytest to verify all tests pass".
+  - `dir_path`: run somewhere other than the project root, but only inside the workspace.
+  - `is_background`: long-running servers or watchers go to the background instead of blocking the agent loop forever.
+  - `delay_ms`: how long to wait after a background start so early output/errors can be captured.
+- **Description line that corrects a model mistake:**
+  > To run a command in the background, set the `is_background` parameter to true. Do NOT use `&` to background commands.
+
+  **Mistake:** models trained on shell scripts reach for `cmd &`, which detaches a process the CLI can't track, read output from, or kill (the tool manages process groups via PGID instead).
+- **Deliberately does not:** run outside the workspace or run empty commands.
+  `validateToolParamValues` (shell.ts L1220) rejects an empty `command` and checks `dir_path`
+  with `validatePathAccess`. It also does not decide on its own whether a command is safe:
+  every call goes through the user's confirmation dialog (all 3 shell calls in my trace show
+  `decision=accept`). [OBSERVED]
 
 ### Why old/new string edits?
 TODO — two reasons plus a trace moment.
