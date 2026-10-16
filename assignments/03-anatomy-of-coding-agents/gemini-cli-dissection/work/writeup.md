@@ -270,13 +270,97 @@ over.
 ## Part IV — Behavioral analysis
 
 ### 1. The loop
+From `session_timeline.txt` [OBSERVED]; `⟳503` = a `503 high demand` error retried automatically by the CLI.
 ```
-TODO: call#1 → tool → call#2 → …
+USER prompt
+ → call#1  → update_topic + read_file(TASK.md)
+ → call#2  → update_topic + run_shell_command(python -m pytest)      # 2 failed, 12 passed
+ → call#3  → update_topic + read_file(shopcart/cart.py)
+ → ⟳503 ⟳503 → call#4  → read_file(shopcart/pricing.py)
+ → ⟳503 → call#5  → read_file(tests/test_cart.py)
+ → call#6  → update_topic + read_file(tests/test_pricing.py)
+ → call#7  → read_file(shopcart/catalog.py)
+ → call#8  → update_topic + grep_search("\.total\(")                   # 4,641 thinking tokens
+ → call#9  → update_topic + replace(shopcart/cart.py)
+ → call#10 → update_topic + replace(shopcart/pricing.py)
+ → call#11 → update_topic + read_file(tests/test_cart.py)              # re-read before editing
+ → call#12 → update_topic + replace(tests/test_cart.py)
+ → call#13 → update_topic + run_shell_command(python -m pytest)        # 18 passed
+ → call#14 → update_topic + run_shell_command(git status && git diff)
+ → call#15 → update_topic("Task Completed")
+ → ⟳503 → call#16 → final text answer, no tool call → loop ends
 ```
-What ended it: TODO
+Every call returned 1–2 tool calls except #16, which returned only text.
+
+**What ended it:** the agent itself. Call #16 returned a text-only response with no tool
+call, which is the loop's stop condition; it had announced "Task Completed" via
+`update_topic` at call #15. [OBSERVED] No limit was hit and I did not intervene.
 
 ### 2. Context growth
-TODO — chart or table, then explanation (growth and caching).
+`input_token_count` per call, from `submission/session_calls.csv` [OBSERVED]:
+```
+call  input tokens
+ 1  11,419 ████████████████████████████████████████
+ 2  11,939 ██████████████████████████████████████████
+ 3  12,771 █████████████████████████████████████████████
+ 4  13,293 ██████████████████████████████████████████████
+ 5  13,729 ████████████████████████████████████████████████
+ 6  14,811 ████████████████████████████████████████████████████
+ 7  16,435 ██████████████████████████████████████████████████████████
+ 8  16,669 ██████████████████████████████████████████████████████████
+ 9  21,638 ████████████████████████████████████████████████████████████████████████████
+10  22,936 ████████████████████████████████████████████████████████████████████████████████
+11  24,005 ████████████████████████████████████████████████████████████████████████████████████
+12  24,710 ███████████████████████████████████████████████████████████████████████████████████████
+13  26,771 ██████████████████████████████████████████████████████████████████████████████████████████████
+14  27,102 ███████████████████████████████████████████████████████████████████████████████████████████████
+15  29,099 ██████████████████████████████████████████████████████████████████████████████████████████████████████
+16  29,194 ██████████████████████████████████████████████████████████████████████████████████████████████████████
+```
+
+| Call | input | cached | cached % | output | thoughts |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 11,419 | 6,090 | 53% | 59 | 166 |
+| 2 | 11,939 | 8,111 | 67% | 69 | 77 |
+| 3 | 12,771 | 6,079 | 47% | 72 | 62 |
+| 4 | 13,293 | 10,122 | 76% | 23 | 30 |
+| 5 | 13,729 | 10,119 | 73% | 24 | 554 |
+| 6 | 14,811 | 12,145 | 81% | 69 | 1321 |
+| 7 | 16,435 | 14,170 | 86% | 23 | 13 |
+| 8 | 16,669 | 14,164 | 84% | 64 | 4641 |
+| 9 | 21,638 | 16,219 | 74% | 241 | 800 |
+| 10 | 22,936 | 6,080 | 26% | 477 | 198 |
+| 11 | 24,005 | 20,263 | 84% | 67 | 88 |
+| 12 | 24,710 | 22,280 | 90% | 838 | 574 |
+| 13 | 26,771 | 24,310 | 90% | 69 | 31 |
+| 14 | 27,102 | 24,298 | 89% | 75 | 58 |
+| 15 | 29,099 | 2,025 | 6% | 33 | 24 |
+| 16 | 29,194 | 26,319 | 90% | 227 | 18 |
+
+Totals: 316,521 input tokens across 16 calls, of which 222,794 (70%) were cached. [OBSERVED]
+
+**Why it grows:** the model is stateless, so every call re-sends the whole conversation:
+system prompt + tool declarations + `<session_context>` + my prompt + every previous model
+turn + every tool result. The input can only grow. [INFERRED from the steadily rising
+counts] It starts at ~11.4k before the agent has done anything, which is the fixed cost
+of the system prompt, 16 tool schemas, and session context. The biggest single jump is
+#8 → #9 (+4,969), right after the `grep_search` result and the long thinking turn at #8;
+the steady +500 to +1,600 steps track each file read or pytest output added to history.
+Over the session the input grew 2.6× (11,419 → 29,194). [OBSERVED]
+
+**What `cached_content_token_count` says:** how much of each call's input was an exact
+prefix the API had already processed and could reuse. Because history only grows at the
+end, most of each request is the same prefix as the last one, so cache hits reach 84–90%
+by the later calls. [OBSERVED] Two calls fell back to almost no cache (#10: 26%, #15: 6%),
+so their prefix was recomputed at full price. [OBSERVED] I can't see why from the trace;
+cache entries can expire or be evicted. [INFERRED]
+
+**Why caching matters:** cached input tokens are billed at a fraction of the normal input
+price and skip recomputation, so they lower both cost and time-to-first-token. Without
+caching, the cost of a session grows roughly quadratically with its length, because turn N
+pays for all N−1 earlier turns again. This is also why the system prompt's "Context
+Efficiency" section (L16) says that "the larger context is early in the session, the more
+expensive each subsequent turn is." [INFERRED]
 
 ### 3. Planning
 TODO
